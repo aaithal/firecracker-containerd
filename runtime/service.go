@@ -484,6 +484,10 @@ func (s *service) publishVMStop() error {
 	return s.eventExchange.Publish(s.shimCtx, StopEventName, &proto.VMStop{VMID: s.vmID})
 }
 
+func jailerRootDir(shimBaseDir, namespace, vmID string) string {
+	return filepath.Join(shimBaseDir, namespace, vmID)
+}
+
 func (s *service) createVM(requestCtx context.Context, request *proto.CreateVMRequest) (err error) {
 	var vsockFd *os.File
 	defer func() {
@@ -498,7 +502,7 @@ func (s *service) createVM(requestCtx context.Context, request *proto.CreateVMRe
 	}
 
 	s.logger.Info("creating new VM")
-	s.jailer, err = newJailer(s.shimCtx, s.logger, filepath.Join(s.config.ShimBaseDir, namespace, s.vmID), s, request)
+	s.jailer, err = newJailer(s.shimCtx, s.logger, jailerRootDir(s.config.ShimBaseDir, namespace, s.vmID), s, request)
 	if err != nil {
 		return errors.Wrap(err, "failed to create jailer")
 	}

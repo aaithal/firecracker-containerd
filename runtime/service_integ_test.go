@@ -462,7 +462,7 @@ func testMultipleExecs(
 	if jailerConfig != nil {
 		jailer := &runcJailer{
 			Config: runcJailerConfig{
-				OCIBundlePath: filepath.Join(shimBaseDir(), vmIDStr),
+				OCIBundlePath: jailerRootDir(shimBaseDir(), "default", vmIDStr),
 			},
 			vmID: vmIDStr,
 		}
