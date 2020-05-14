@@ -466,9 +466,19 @@ func (j *runcJailer) setDefaultConfigValues(cfg *config.Config, socketPath strin
 // Close will cleanup the container that may be left behind if the jailing
 // process was killed via SIGKILL.
 func (j *runcJailer) Close() error {
-	return j.runcClient.Delete(j.ctx, j.vmID, &runc.DeleteOpts{
-		Force: true,
-	})
+	// Even the jailer's associated context is cancelled,
+	// we'd like to do the cleanups below just in case.
+	ctx := context.Background()
+
+	_, stateErr := j.runcClient.State(ctx, j.vmID)
+	if stateErr == nil {
+		// Delete the container, if it is still running.
+		err := j.runcClient.Delete(ctx, j.vmID, &runc.DeleteOpts{Force: true})
+		if err != nil {
+			return err
+		}
+	}
+	return os.RemoveAll(j.OCIBundlePath())
 }
 
 func mkdirAndChown(path string, mode os.FileMode, uid, gid uint32) error {

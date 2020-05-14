@@ -126,6 +126,7 @@ type service struct {
 	// vmExitErr is set with the error returned by machine.Wait(). It should
 	// only be read after shimCtx.Done() is closed
 	vmExitErr                error
+	cleanupOnce              sync.Once
 	vmStartOnce              sync.Once
 	agentClient              taskAPI.TaskService
 	eventBridgeClient        eventbridge.Getter
@@ -484,6 +485,10 @@ func (s *service) publishVMStop() error {
 	return s.eventExchange.Publish(s.shimCtx, StopEventName, &proto.VMStop{VMID: s.vmID})
 }
 
+func jailerRootDir(shimBaseDir, namespace, vmID string) string {
+	return filepath.Join(shimBaseDir, namespace, vmID)
+}
+
 func (s *service) createVM(requestCtx context.Context, request *proto.CreateVMRequest) (err error) {
 	var vsockFd *os.File
 	defer func() {
@@ -492,8 +497,13 @@ func (s *service) createVM(requestCtx context.Context, request *proto.CreateVMRe
 		}
 	}()
 
+	namespace, ok := namespaces.Namespace(s.shimCtx)
+	if !ok {
+		namespace = namespaces.Default
+	}
+
 	s.logger.Info("creating new VM")
-	s.jailer, err = newJailer(s.shimCtx, s.logger, filepath.Join(s.config.ShimBaseDir, s.vmID), s, request)
+	s.jailer, err = newJailer(s.shimCtx, s.logger, jailerRootDir(s.config.ShimBaseDir, namespace, s.vmID), s, request)
 	if err != nil {
 		return errors.Wrap(err, "failed to create jailer")
 	}
@@ -574,7 +584,6 @@ func (s *service) StopVM(requestCtx context.Context, request *proto.StopVMReques
 		timeout = time.Duration(request.TimeoutSeconds) * time.Second
 	}
 
-	defer s.shimCancel()
 	err = s.waitVMReady()
 	if err != nil {
 		return nil, err
@@ -1165,11 +1174,21 @@ func (s *service) shutdown(
 		s.shutdownLoop(requestCtx, timeout, req)
 	}()
 
-	err := s.machine.Wait(context.Background())
-	if err == nil {
+	var result *multierror.Error
+	if err := s.machine.Wait(context.Background()); err != nil {
+		result = multierror.Append(result, err)
+	}
+	if err := s.cleanup(); err != nil {
+		result = multierror.Append(result, err)
+	}
+	if result == nil {
 		return nil
 	}
-	return status.Error(codes.Internal, fmt.Sprintf("the VMM was killed forcibly: %v", err))
+
+	if err := result.ErrorOrNil(); err != nil {
+		return status.Error(codes.Internal, fmt.Sprintf("the VMM was killed forcibly: %v", err))
+	}
+	return nil
 }
 
 // shutdownLoop sends multiple different shutdown requests to stop the VMM.
@@ -1203,13 +1222,6 @@ func (s *service) shutdownLoop(
 				return s.jailer.Stop()
 			},
 			timeout: jailerStopTimeout,
-		},
-		{
-			name: "cancel the context",
-			shutdown: func() error {
-				s.shimCancel()
-				return nil
-			},
 		},
 	}
 
@@ -1286,26 +1298,35 @@ func (s *service) Cleanup(requestCtx context.Context) (*taskAPI.DeleteResponse, 
 	}, nil
 }
 
-func (s *service) monitorVMExit() {
-	defer func() {
+// cleanup resources
+func (s *service) cleanup() error {
+	s.cleanupOnce.Do(func() {
 		// we ignore the error here due to cleanup will only succeed if the jailing
 		// process was killed via SIGKILL
 		if err := s.jailer.Close(); err != nil {
+			s.vmExitErr = err
 			s.logger.WithError(err).Error("failed to close jailer")
+		}
+
+		err := s.publishVMStop()
+		if err != nil {
+			s.logger.WithError(err).Error("failed to publish stop VM event")
 		}
 
 		// once the VM shuts down, the shim should too
 		s.shimCancel()
-	}()
+	})
+	return s.vmExitErr
+}
 
+// monitorVMExit watches the VM and cleanup resources when it terminates.
+func (s *service) monitorVMExit() {
 	// Block until the VM exits
-	s.vmExitErr = s.machine.Wait(s.shimCtx)
-	if s.vmExitErr != nil && s.vmExitErr != context.Canceled {
-		s.logger.WithError(s.vmExitErr).Error("error returned from VM wait")
+	if err := s.machine.Wait(s.shimCtx); err != nil && err != context.Canceled {
+		s.logger.WithError(err).Error("error returned from VM wait")
 	}
 
-	publishErr := s.publishVMStop()
-	if publishErr != nil {
-		s.logger.WithError(publishErr).Error("failed to publish stop VM event")
+	if err := s.cleanup(); err != nil {
+		s.logger.WithError(err).Error("failed to clean up the VM")
 	}
 }
