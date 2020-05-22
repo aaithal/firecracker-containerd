@@ -93,6 +93,11 @@ func taskWorkflow(containerCIDR, gateway, snapshotter string) (err error) {
 			VcpuCount:  2,
 			MemSizeMib: 2048,
 		},
+		JailerConfig: &proto.JailerConfig{
+			CPUs: "0-35",
+			UID:  70001,
+			GID:  70001,
+		},
 	}
 
 	if containerCIDR != "" {
